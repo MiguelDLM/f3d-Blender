@@ -86,7 +86,8 @@ def load(context, filepath, deviation=0.1, join_bodies=False,
 
     all_bodies = []
     for blob in blobs:
-        all_bodies.extend(brep.Brep(sab.parse(blob)).bodies())
+        parsed = brep.Brep(sab.parse(blob), deviation=deviation)
+        all_bodies.extend(parsed.bodies())
 
     if merge_duplicates:
         unique = []
