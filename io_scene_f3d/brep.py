@@ -79,11 +79,34 @@ def _ratio_value(rec) -> float:
     return 1.0
 
 
+def _surface_axis(surf):
+    """Return the extrusion/revolution axis (unit) of a cone or cyl_spl_sur.
+
+    * cone: the second XYZ (its axis direction).
+    * cylindrical spline surface (``cyl_spl_sur``): the unit-length position
+      tuple stored as the generator direction.
+    Returns ``None`` for surfaces without a well-defined single axis.
+    """
+    if surf is None:
+        return None
+    if surf.name == "cone":
+        pos = surf.positions()
+        return _unit(pos[1]) if len(pos) >= 2 else None
+    names = [v.name for v in surf.values if isinstance(v, sab.TypeName)]
+    if "cyl_spl_sur" in names:
+        for v in surf.positions():
+            if abs(_length(v) - 1.0) < 1e-6:
+                return v
+    return None
+
+
 @dataclass
 class Face:
     surface_kind: str                       # plane / cone / spline / ...
     loops: list = field(default_factory=list)   # list[list[(x,y,z)]]; [0]=outer
     normal: tuple | None = None             # analytic surface normal, if known
+    axis: tuple | None = None               # extrusion/revolution axis (unit), if any
+    loop_edges: list = field(default_factory=list)  # per loop: list of edge polylines
 
 
 @dataclass
@@ -231,29 +254,41 @@ class Brep:
         return pts
 
     def _loop_ring(self, loop):
-        """Ordered ring of 3D points around one loop (coedge chain, sampled)."""
+        """Return (ring, edges) for one loop.
+
+        ``ring`` is the concatenated ordered point ring; ``edges`` is the list
+        of per-edge sampled polylines in loop order (each traversed in the
+        coedge direction).  ``edges`` lets the tessellator tell profile edges
+        from rail edges on swept faces.
+        """
         coedges = self._walk(self._ref_at(loop, LOOP_COEDGE), COEDGE_NEXT)
         ring = []
+        edges = []
         for ce in coedges:
             edge = self._ref_at(ce, COEDGE_EDGE)
             if edge is None:
                 continue
             sense = ce.values[COEDGE_SENSE] if COEDGE_SENSE < len(ce.values) else False
             poly = self._sample_edge(edge, reverse=(sense is True))
-            # append everything but the last point (the next coedge repeats it)
+            if len(poly) >= 2:
+                edges.append(poly)
             ring.extend(poly[:-1] if len(poly) > 1 else poly)
-        return ring
+        return ring, edges
 
     def _face(self, face_rec):
         surf = self._ref_at(face_rec, FACE_SURFACE)
         kind, normal = self._surface_info(surf)
+        axis = _surface_axis(surf) if kind in ("cone", "spline") else None
         loops = self._walk(self._ref_at(face_rec, FACE_LOOP), LOOP_NEXT)
         rings = []
+        loop_edges = []
         for lp in loops:
-            ring = self._loop_ring(lp)
+            ring, edges = self._loop_ring(lp)
             if len(ring) >= 3:
                 rings.append(ring)
-        return Face(surface_kind=kind, loops=rings, normal=normal)
+                loop_edges.append(edges)
+        return Face(surface_kind=kind, loops=rings, normal=normal,
+                    axis=axis, loop_edges=loop_edges)
 
     # -- public -------------------------------------------------------------
     def bodies(self):
