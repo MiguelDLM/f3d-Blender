@@ -1,0 +1,18 @@
+schema_version = "1.0.0"
+
+id = "io_scene_f3d"
+version = "0.1.0"
+name = "Import Autodesk Fusion (.f3d)"
+tagline = "Import Fusion 360 .f3d archives (ASM B-rep) as meshes"
+maintainer = "f3d-blender contributors"
+type = "add-on"
+
+website = "https://github.com/"
+tags = ["Import-Export"]
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+
+# Pure-Python, no bundled wheels or platform-specific code.
+platforms = ["windows-x64", "macos-arm64", "macos-x64", "linux-x64"]
