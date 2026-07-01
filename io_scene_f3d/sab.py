@@ -180,7 +180,11 @@ def _read_value(r: _Reader, tag: int):
         return r.string()
     if tag in (TAG_POSITION, TAG_VECTOR):
         return r.vec3()
-    if tag in (TAG_ENUM_A, TAG_ENUM_B, TAG_MARKER):
+    if tag == TAG_ENUM_A:
+        return False   # logical / enum, first value (e.g. forward)
+    if tag == TAG_ENUM_B:
+        return True    # logical / enum, second value (e.g. reversed)
+    if tag == TAG_MARKER:
         return None
     raise SabError(f"unhandled value tag 0x{tag:02x} at offset {r.i - 1}")
 

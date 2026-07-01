@@ -45,6 +45,17 @@ if _HAVE_BPY:
             description="Max distance between a curved surface and its mesh (in model units). Smaller = finer mesh",
             default=0.1, min=0.001, max=10.0,
         )
+        global_scale: FloatProperty(
+            name="Scale",
+            description="Scale factor. Fusion works in cm; 0.01 maps model cm to Blender m",
+            default=0.01, min=1e-6, max=1000.0,
+        )
+        merge_duplicates: BoolProperty(
+            name="Merge duplicates",
+            description="Collapse geometrically identical coincident bodies "
+                        "(Fusion configuration states / identity instances)",
+            default=True,
+        )
         join_bodies: BoolProperty(
             name="Join bodies",
             description="Merge all solid bodies into a single mesh object",
@@ -58,6 +69,8 @@ if _HAVE_BPY:
                     context, self.filepath,
                     deviation=self.deviation,
                     join_bodies=self.join_bodies,
+                    global_scale=self.global_scale,
+                    merge_duplicates=self.merge_duplicates,
                 )
             except Exception as exc:  # surface a clean error in the UI
                 self.report({"ERROR"}, f"F3D import failed: {exc}")
