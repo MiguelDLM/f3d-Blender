@@ -21,9 +21,10 @@ import math
 from dataclasses import dataclass, field
 
 try:  # package import (inside Blender add-on)
-    from . import sab
+    from . import sab, nurbs
 except ImportError:  # standalone (tests)
     import sab
+    import nurbs
 
 
 # --- small vector helpers -------------------------------------------------
@@ -76,55 +77,6 @@ def _ratio_value(rec) -> float:
         elif seen_pos >= 3 and isinstance(v, (int, float)) and not isinstance(v, bool):
             return float(v)
     return 1.0
-
-
-def _nubs_control_points(curve):
-    """Extract the (x, y, z) control points of the curve's ``nubs`` block.
-
-    In the flattened record the control points are the run of consecutive
-    doubles that immediately precedes the trailing ``null_surface`` markers
-    (the knot values are separated from them by integer multiplicities).
-    """
-    vals = curve.values
-    start = None
-    for i, v in enumerate(vals):
-        if isinstance(v, sab.TypeName) and v.name == "nubs":
-            start = i + 1
-            break
-    if start is None:
-        return []
-    # find the end: first TypeName after the nubs header
-    end = len(vals)
-    for i in range(start, len(vals)):
-        if isinstance(vals[i], sab.TypeName):
-            end = i
-            break
-    # the control-point block is the last contiguous run of floats in [start,end)
-    run_end = end
-    while run_end > start and not _is_num(vals[run_end - 1]):
-        run_end -= 1
-    run_start = run_end
-    while run_start > start and _is_num(vals[run_start - 1]):
-        run_start -= 1
-    nums = [float(vals[i]) for i in range(run_start, run_end)]
-    cps = [(nums[k], nums[k + 1], nums[k + 2]) for k in range(0, len(nums) - 2, 3)]
-    return cps
-
-
-def _is_num(v):
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
-
-
-def _sample_nubs(curve, arc_seg_fn):
-    """Sample a spline (intcurve/nubs) edge.
-
-    Disabled for now: a naive control-polygon approximation produces large
-    overshoots (a B-spline's control points can lie far from the curve), so we
-    fall back to the edge endpoints (a straight chord) which is safe.  Proper
-    de Boor evaluation with a correctly-parsed knot vector is future work; the
-    control points can be recovered via :func:`_nubs_control_points`.
-    """
-    return None
 
 
 @dataclass
@@ -222,6 +174,30 @@ class Brep:
                                  _scale(minor_dir, b * st))))
         return pts
 
+    def _sample_spline_curve(self, curve, t0, t1, v0, v1):
+        """Sample an intcurve/nubs edge with de Boor, guarded against garbage.
+
+        Returns ``None`` (caller falls back to a straight chord) if the block
+        can't be parsed or the samples stray outside a padded box around the
+        edge endpoints -- a cheap sanity net against mis-parsed control nets.
+        """
+        parsed = nurbs.curve_from_record(curve)
+        if parsed is None:
+            return None
+        deg, U, P = parsed
+        span = abs(t1 - t0)
+        nseg = max(6, min(200, int(math.ceil(span * 8)) + len(P)))
+        pts = nurbs.sample_curve(deg, U, P, t0, t1, nseg)
+        if v0 is not None and v1 is not None:
+            lo = [min(v0[c], v1[c]) for c in range(3)]
+            hi = [max(v0[c], v1[c]) for c in range(3)]
+            pad = max(1e-3, 2.0 * _length(_sub(v1, v0)))
+            for p in pts:
+                for c in range(3):
+                    if p[c] < lo[c] - pad or p[c] > hi[c] + pad:
+                        return None    # sample escaped the endpoint box -> reject
+        return pts
+
     def _sample_edge(self, edge, reverse):
         """Return the polyline of ``edge`` traversed in the coedge direction.
 
@@ -239,7 +215,7 @@ class Brep:
         if kind == "ellipse":
             pts = self._sample_ellipse(curve, t0, t1)
         elif kind in ("intcurve", "curve"):
-            pts = _sample_nubs(curve, self._arc_segments)
+            pts = self._sample_spline_curve(curve, t0, t1, v0, v1)
 
         if not pts:  # straight or unevaluated curve -> just the endpoints
             pts = [p for p in (v0, v1) if p is not None]
