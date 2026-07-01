@@ -59,18 +59,27 @@ def _build_mesh(name, body, scale):
 
 
 def _body_signature(body):
-    """A hashable fingerprint of a body's geometry (for de-duplication).
+    """A coarse fingerprint of a body's placement (for de-duplication).
 
-    Fusion may bake several geometrically identical, coincident bodies into one
-    file (configuration states / identity-transform instances).  Bodies with the
-    same rounded vertex set collapse to one signature.
+    Fusion bakes several coincident bodies into one file (configuration-table
+    states / identity-transform instances) that occupy the same space.  They
+    may differ slightly in tessellation, so we fingerprint by rounded bounding
+    box + face count rather than exact vertices; coincident bodies collapse to
+    one and only genuinely separate parts survive.
     """
-    coords = set()
+    lo = [float("inf")] * 3
+    hi = [float("-inf")] * 3
     for face in body.faces:
         for ring in face.loops:
             for p in ring:
-                coords.add((round(p[0], 5), round(p[1], 5), round(p[2], 5)))
-    return frozenset(coords)
+                for c in range(3):
+                    lo[c] = min(lo[c], p[c])
+                    hi[c] = max(hi[c], p[c])
+    return (
+        tuple(round(x, 2) for x in lo),
+        tuple(round(x, 2) for x in hi),
+        len(body.faces),
+    )
 
 
 def load(context, filepath, deviation=0.1, join_bodies=False,
