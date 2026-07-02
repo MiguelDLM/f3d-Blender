@@ -51,6 +51,14 @@ def _build_mesh(name, body, scale):
     bm = bmesh.new()
     bm.from_mesh(mesh)
     bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-6)
+    # A solid B-rep tessellates watertight, so any remaining boundary edge is
+    # a defect -- typically a sliver where ASM stores the same ring as
+    # different edge records on each side (sampled at different densities).
+    # Close such small cracks; genuine model holes have walls, not boundaries.
+    border = [e for e in bm.edges if e.is_boundary]
+    if border:
+        bmesh.ops.holes_fill(bm, edges=border, sides=8)
+        bmesh.ops.triangulate(bm, faces=bm.faces)
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     bm.to_mesh(mesh)
     bm.free()

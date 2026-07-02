@@ -14,9 +14,15 @@ formato.
 |---|---|---|
 | Contenedor ZIP | `io_scene_f3d/container.py` | ✅ |
 | Tokenizer ASM SAB | `io_scene_f3d/sab.py` | ✅ |
-| Reconstrucción topológica B-rep | `io_scene_f3d/brep.py` | 🚧 |
-| Teselación de caras | `io_scene_f3d/tessellate.py` | 🔜 |
-| Operador de importación | `io_scene_f3d/importer.py` | 🔜 |
+| Reconstrucción topológica B-rep | `io_scene_f3d/brep.py` | ✅ |
+| Superficies analíticas (cono, extrusión, ref pool) | `io_scene_f3d/surfaces.py` | ✅ |
+| Curvas B-spline (de Boor, abiertas y periódicas) | `io_scene_f3d/nurbs.py` | ✅ |
+| Teselación (CDT paramétrico + loft) | `io_scene_f3d/tessellate.py` | ✅ |
+| Operador de importación | `io_scene_f3d/importer.py` | ✅ |
+
+Fidelidad contra el OBJ exportado por Fusion del mismo modelo: área total
+76.668 vs 76.608 cm² (0.08 %), desviación media 10–26 µm (máx 140 µm),
+malla estanca (0 aristas no-manifold).
 
 ## Pruebas (sin Blender)
 

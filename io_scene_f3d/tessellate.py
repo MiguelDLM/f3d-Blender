@@ -224,6 +224,53 @@ def _loft(rail_a, rail_b):
     return verts, tris
 
 
+def _arclen_fractions(pts, closed):
+    """Cumulative arc-length fraction of each point along a chain/ring."""
+    n = len(pts)
+    seg = [_dist(pts[i], pts[i + 1]) for i in range(n - 1)]
+    if closed:
+        seg.append(_dist(pts[-1], pts[0]))
+    total = sum(seg) or 1.0
+    fr = [0.0]
+    acc = 0.0
+    for s in seg[:len(pts) - 1]:
+        acc += s
+        fr.append(acc / total)
+    return fr
+
+
+def _bridge(chain_a, chain_b, closed):
+    """Triangulate between two chains WITHOUT moving any point.
+
+    Walks both point lists by arc-length fraction (like Blender's bridge
+    loops), so the original vertices — shared exactly with neighbouring
+    faces — are preserved and the final mesh welds watertight.
+    """
+    fa = _arclen_fractions(chain_a, closed)
+    fb = _arclen_fractions(chain_b, closed)
+    na, nb = len(chain_a), len(chain_b)
+    verts = list(chain_a) + list(chain_b)
+    tris = []
+    ia = ib = 0
+    steps = na + nb + 2
+    for _ in range(steps):
+        a_done = ia >= na - (0 if closed else 1)
+        b_done = ib >= nb - (0 if closed else 1)
+        if a_done and b_done:
+            break
+        next_fa = fa[ia + 1] if ia + 1 < na else 1.0
+        next_fb = fb[ib + 1] if ib + 1 < nb else 1.0
+        if not a_done and (b_done or next_fa <= next_fb):
+            a2 = (ia + 1) % na
+            tris.append((ia, a2, na + ib))
+            ia += 1
+        else:
+            b2 = (ib + 1) % nb
+            tris.append((ia % na, na + b2, na + ib))
+            ib += 1
+    return verts, tris
+
+
 def _tessellate_swept(face):
     """Tessellate a swept/extruded/ruled face by lofting between two profiles.
 
@@ -235,21 +282,35 @@ def _tessellate_swept(face):
     surfaces that carry no inline geometry.  Returns ``None`` if the face does
     not match this pattern.
     """
-    # Case A: two loops -> loft between them directly (no axis needed).
+    # Case A: two loops -> bridge between them directly (no axis needed).
     if len(face.loops) == 2:
         a, b = face.loops[0], face.loops[1]
         if len(a) < 3 or len(b) < 3:
             return None
-        n = max(len(a), len(b), 8)
-        ra = _resample(a + [a[0]], n)
-        rb = _align_ring(ra, _resample(b + [b[0]], n))
-        return _loft(ra, rb)
+        return _bridge(a, _phase_align(a, b), closed=True)
 
     # Case B: single loop split by two parallel straight rails.
     if len(face.loops) == 1 and face.loop_edges:
         edges = face.loop_edges[0]
         if len(edges) < 3:
             return None
+        # Seam-cut annulus (e.g. a fillet ring): the same edge appears twice
+        # (once per direction); the remaining edges form the two closed
+        # profiles -> loft them ring-to-ring.  The profiles are rebuilt by
+        # endpoint chaining rather than by their position between the seam
+        # copies, because greedy loop chaining can put the two copies next to
+        # each other (their endpoints coincide exactly).
+        seam = _find_seam_pair(edges)
+        if seam:
+            i, j = seam
+            rest = [e for k, e in enumerate(edges) if k not in (i, j)]
+            comps = _closed_components(rest)
+            if len(comps) == 2 and all(len(c) >= 3 for c in comps):
+                prof1, prof2 = comps
+                strip = _ring_strip(prof1, prof2, closed=True)
+                if strip:
+                    return strip
+                return _bridge(prof1, _phase_align(prof1, prof2), closed=True)
         straights = [k for k, e in enumerate(edges) if _is_straight(e)]
         rails = _pick_rails(edges, straights, face.axis)
         if not rails:
@@ -259,11 +320,102 @@ def _tessellate_swept(face):
         prof2 = [p for e in (edges[j + 1:] + edges[:i]) for p in e]
         if len(prof1) < 2 or len(prof2) < 2:
             return None
-        n = max(len(prof1), len(prof2), 6)
-        ra = _resample(prof1, n)
-        rb = _resample(list(reversed(prof2)), n)   # opposite traversal
-        return _loft(ra, rb)
+        prof2 = list(reversed(prof2))     # opposite traversal
+        return _bridge(prof1, prof2, closed=False)
 
+    return None
+
+
+def _pt_seg_dist(p, a, b):
+    """Distance from ``p`` to segment ``ab`` and the closest point."""
+    ab = _sub(b, a)
+    L2 = _dot(ab, ab)
+    t = 0.0 if L2 < 1e-18 else max(0.0, min(1.0, _dot(_sub(p, a), ab) / L2))
+    q = tuple(a[c] + ab[c] * t for c in range(3))
+    return _dist(p, q), q
+
+
+def _pt_polyline_nearest(p, poly, closed):
+    """Nearest point on a polyline (segment-interpolated)."""
+    best = (float("inf"), poly[0])
+    n = len(poly)
+    last = n if closed else n - 1
+    for i in range(last):
+        d, q = _pt_seg_dist(p, poly[i], poly[(i + 1) % n])
+        if d < best[0]:
+            best = (d, q)
+    return best
+
+
+def _ring_strip(prof_a, prof_b, closed):
+    """Quad-strip between two equal-count vertex-paired profiles.
+
+    Used for seam-cut blend rings whose two contact profiles were sampled
+    from the same periodic curve family, so their vertices correspond 1:1
+    once phase-aligned.  Pairing vertices directly (instead of walking by
+    arc length as :func:`_bridge` does) keeps the strip untwisted, which
+    matters on blends: Fusion evaluates their cross-sections as shallow
+    spline sections (NOT circular rolling-ball arcs -- verified against the
+    reference OBJ, whose sections deviate from a straight chord by ~5% of
+    its length), so the honest approximation is the ruled strip between
+    corresponding points.  Returns ``None`` when the counts differ.
+    """
+    if len(prof_a) != len(prof_b):
+        return None
+    if closed:
+        prof_b = _phase_align(prof_a, prof_b)
+    elif _dist(prof_a[0], prof_b[0]) > _dist(prof_a[0], prof_b[-1]):
+        prof_b = list(reversed(prof_b))
+    n = len(prof_a)
+    verts = list(prof_a) + list(prof_b)
+    tris = []
+    last = n if closed else n - 1
+    for i in range(last):
+        j = (i + 1) % n
+        tris.append((i, j, n + j))
+        tris.append((i, n + j, n + i))
+    return verts, tris
+
+
+def _closed_components(polys):
+    """Chain edge polylines into closed rings by shared-endpoint matching.
+
+    Loop edges share exact vertex coordinates, so matching at 1e-9 is safe.
+    Each returned ring has its duplicate closing point dropped.
+    """
+    remaining = [list(p) for p in polys]
+    comps = []
+    while remaining:
+        chain = remaining.pop(0)
+        grown = True
+        while grown and _dist(chain[0], chain[-1]) > 1e-9:
+            grown = False
+            for k, poly in enumerate(remaining):
+                if _dist(chain[-1], poly[0]) < 1e-9:
+                    chain += poly[1:]
+                elif _dist(chain[-1], poly[-1]) < 1e-9:
+                    chain += list(reversed(poly))[1:]
+                else:
+                    continue
+                remaining.pop(k)
+                grown = True
+                break
+        if len(chain) > 1 and _dist(chain[0], chain[-1]) < 1e-9:
+            chain.pop()
+        comps.append(chain)
+    return comps
+
+
+def _find_seam_pair(edges):
+    """Indices (i, j) of two polylines with identical (or reversed) geometry."""
+    for i in range(len(edges)):
+        for j in range(i + 1, len(edges)):
+            a, b = edges[i], edges[j]
+            if len(a) != len(b):
+                continue
+            if all(_dist(p, q) < 1e-9 for p, q in zip(a, b)) or \
+               all(_dist(p, q) < 1e-9 for p, q in zip(a, reversed(b))):
+                return (i, j)
     return None
 
 
@@ -318,24 +470,155 @@ def _point_line_dist(p, a, b):
     return _dist(p, proj)
 
 
-def _align_ring(ref, ring):
-    """Rotate/flip closed ``ring`` to best match ``ref`` point order."""
+def _phase_align(ref, ring):
+    """Rotate/flip closed ``ring`` (without moving points) to match ``ref``.
+
+    Chooses the rotation starting nearest ``ref[0]`` and the direction whose
+    quarter-way point matches ``ref``'s quarter-way point best, so a
+    subsequent arc-length bridge walks both rings in the same sense.
+    """
     n = len(ring)
+    start = min(range(n), key=lambda i: _dist(ring[i], ref[0]))
+    fwd = ring[start:] + ring[:start]
+    rev = list(reversed(fwd))
+    rev = [rev[-1]] + rev[:-1]          # keep the matched start point first
+    qr = ref[len(ref) // 4]
+    if _dist(fwd[n // 4], qr) <= _dist(rev[n // 4], qr):
+        return fwd
+    return rev
 
-    def cost(seq):
-        return sum(_dist(ref[i], seq[i]) for i in range(n))
 
-    best = ring
-    best_c = cost(ring)
-    rev = list(reversed(ring))
-    for cand in (ring, rev):
-        for s in range(n):
-            rot = cand[s:] + cand[:s]
-            c = cost(rot)
-            if c < best_c:
-                best_c = c
-                best = rot
-    return best
+def _wrap_pi(a):
+    """Wrap an angle difference into (-pi, pi]."""
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+
+def _point_in_poly(x, y, poly):
+    """Even-odd point-in-polygon test in 2D."""
+    inside = False
+    n = len(poly)
+    for i in range(n):
+        x0, y0 = poly[i]
+        x1, y1 = poly[(i + 1) % n]
+        if (y0 > y) != (y1 > y):
+            xt = x0 + (y - y0) * (x1 - x0) / (y1 - y0)
+            if xt > x:
+                inside = not inside
+    return inside
+
+
+def _tessellate_on_surface(face):
+    """Exact tessellation of a face with an evaluable surface.
+
+    The boundary loops are mapped into the surface's (u, v) parameter space,
+    triangulated there with Blender's constrained Delaunay (plus a grid of
+    interior Steiner points at boundary-sampling density), and the interior
+    vertices are lifted back with ``surface.eval``.  Boundary vertices reuse
+    the exact 3D ring points so adjacent faces weld watertight.
+
+    Returns ``None`` when not applicable (no surface, full period wrap, or
+    running without Blender's ``mathutils``).
+    """
+    surf = getattr(face, "surface", None)
+    if surf is None:
+        return None
+    try:
+        from mathutils.geometry import delaunay_2d_cdt
+        from mathutils import Vector
+    except ImportError:
+        return None
+
+    # --- project rings to (u, v), unwrapping periodic u along the loop ---
+    uv_loops = []
+    for ring in face.loops:
+        uv = []
+        prev = None
+        for p in ring:
+            u, v = surf.project(p)
+            if surf.periodic_u and prev is not None:
+                u = prev + _wrap_pi(u - prev)
+            uv.append((u, v))
+            prev = u
+        if surf.periodic_u and len(uv) > 1:
+            winding = (uv[-1][0] + _wrap_pi(uv[0][0] - uv[-1][0])) - uv[0][0]
+            if abs(winding) > math.pi:
+                return None      # loop wraps the full period -> loft instead
+        uv_loops.append(uv)
+
+    # --- scale u to be roughly isometric with 3D distance ---
+    ratios = []
+    for uv, ring in zip(uv_loops, face.loops):
+        for i in range(len(uv) - 1):
+            du = abs(uv[i + 1][0] - uv[i][0])
+            d3 = _dist(ring[i], ring[i + 1])
+            if du > 1e-9 and d3 > 1e-12:
+                ratios.append(d3 / du)
+    su = sorted(ratios)[len(ratios) // 2] if ratios else 1.0
+    su = max(su, 1e-6)
+
+    pts2 = []
+    exact3d = []
+    edges = []
+    polys2 = []
+    for uv, ring in zip(uv_loops, face.loops):
+        base = len(pts2)
+        n = len(uv)
+        pts2.extend(Vector((u * su, v)) for (u, v) in uv)
+        exact3d.extend(ring)
+        edges.extend((base + i, base + (i + 1) % n) for i in range(n))
+        polys2.append([(u * su, v) for (u, v) in uv])
+    n_boundary = len(pts2)
+
+    # --- interior Steiner grid at boundary sampling density ---
+    seg = sorted((pts2[a] - pts2[b]).length for a, b in edges)
+    h = max(seg[len(seg) // 2] if seg else 0.1, 1e-4)
+    xs = [p.x for p in pts2]
+    ys = [p.y for p in pts2]
+    # keep the interior grid bounded (~1500 points): visual smoothness is set
+    # by the boundary sampling; the interior only needs comparable density
+    area_box = (max(xs) - min(xs)) * (max(ys) - min(ys))
+    while area_box / (h * h) > 1500:
+        h *= 1.5
+    grid = []
+    if True:
+        x = min(xs) + h * 0.5
+        while x < max(xs):
+            y = min(ys) + h * 0.5
+            while y < max(ys):
+                if _point_in_poly(x, y, polys2[0]) and not any(
+                    _point_in_poly(x, y, hp) for hp in polys2[1:]
+                ):
+                    grid.append(Vector((x, y)))
+                y += h
+            x += h
+
+    try:
+        vco, _e, ofaces, overts, _oe, _of = delaunay_2d_cdt(
+            pts2 + grid, edges, [], 1, 1e-6
+        )
+    except Exception:
+        return None
+
+    verts3 = []
+    for i, co in enumerate(vco):
+        orig = [k for k in overts[i] if k < n_boundary]
+        if orig:
+            verts3.append(exact3d[orig[0]])
+        else:
+            verts3.append(surf.eval(co.x / su, co.y))
+
+    tris = []
+    for fverts in ofaces:
+        for k in range(1, len(fverts) - 1):
+            a, b, c = fverts[0], fverts[k], fverts[k + 1]
+            # drop triangles whose centroid lies outside the trimmed region
+            cx = (vco[a].x + vco[b].x + vco[c].x) / 3
+            cy = (vco[a].y + vco[b].y + vco[c].y) / 3
+            if _point_in_poly(cx, cy, polys2[0]) and not any(
+                _point_in_poly(cx, cy, hp) for hp in polys2[1:]
+            ):
+                tris.append((a, b, c))
+    return (verts3, tris) if tris else None
 
 
 def tessellate_face(face):
@@ -348,9 +631,12 @@ def tessellate_face(face):
     if not loops:
         return [], []
 
-    # Curved faces (anything but a plane) are lofted between their profiles;
-    # fall back to planar triangulation when that doesn't apply.
-    if face.surface_kind != "plane" or len(loops) >= 2:
+    if face.surface_kind != "plane":
+        exact = _tessellate_on_surface(face)
+        if exact:
+            return exact
+        # fallback: blends (no evaluable surface), faces wrapping the full
+        # period (hole walls -> exact ring-to-ring loft), or no Blender
         swept = _tessellate_swept(face)
         if swept and swept[1]:
             return swept

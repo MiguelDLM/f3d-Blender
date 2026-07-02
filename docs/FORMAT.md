@@ -1,14 +1,5 @@
 # Estructura del formato Autodesk Fusion 360 `.f3d`
 
-Documento de ingeniería inversa del formato `.f3d` (Fusion Archive), basado en el
-análisis del fichero de muestra `samples/soporte de corttinas.f3d`
-(Fusion 360, escrito el 2025-01-07 con ASM 230.5.1).
-
-> **Aviso**: `.f3d` es un formato **propietario y no documentado** de Autodesk.
-> Todo lo aquí descrito procede de ingeniería inversa sobre muestras reales, no
-> de documentación oficial. Es correcto para las muestras analizadas pero puede
-> no cubrir todas las variantes que genera Fusion.
-
 ---
 
 ## 1. Contenedor: es un ZIP
@@ -92,7 +83,7 @@ Los records se delimitan **exclusivamente** por el tag de fin de record
 | `0x14` | vector/dirección 3D      | 3 doubles = 24 bytes                    |
 | `0x15` | uint32 (flags/contadores)| 4 bytes                                 |
 
-**Punto crítico de la ingeniería inversa:** dentro de un mismo record puede
+**Punto crítico:** dentro de un mismo record puede
 haber **varios** tags `0x0D`. ASM guarda las entidades de forma polimórfica
 escribiendo primero el nombre de la clase base y luego el/los derivados
 (p.ej. `curve` → `exact_int_cur` → `nubs`, o `surface` → `spline` → `nubs`).
@@ -135,12 +126,106 @@ Conteo del ejemplo `soporte de corttinas.f3d`:
 | face    | 125| loop     | 130 | straight  | 202|
 | point   | 216| pcurve   | 225 | ellipse   | 8  |
 
-### 2.3 B-spline `nubs`
+### 2.3 Offsets verificados de la topología
 
-Bloque de una curva/superficie B-spline no racional (`nubs`):
-grado, luego los **nudos** (pares multiplicidad `int` + valor `double`) y los
-**puntos de control** como ternas de `double` (x, y, z). Las `nurbs` racionales
-añadirían pesos (no observadas en la muestra).
+`values[0]` es siempre el `TypeName` de la entidad; los offsets siguientes
+fueron verificados comprobando el **tipo** del record destino en todos los
+records de cada clase:
+
+| Record  | Posición → destino |
+|---------|--------------------|
+| body    | `[4]`→lump |
+| lump    | `[5]`→shell, `[6]`→body |
+| shell   | `[6]`→face, `[8]`→lump |
+| face    | `[4]`→next face, `[5]`→loop, `[6]`→shell, `[8]`→surface |
+| loop    | `[4]`→next loop (agujeros), `[5]`→coedge, `[6]`→face |
+| coedge  | `[4]`→next, `[5]`→prev, `[7]`→edge, `[8]`=sense (enum), `[9]`→loop, `[11]`→pcurve |
+| edge    | `[4]`→vértice inicio, `[5]`=t₀, `[6]`→vértice fin, `[7]`=t₁, `[9]`→curve |
+| vertex  | `[6]`→point |
+
+**Trampas descubiertas (importantes para cualquier lector):**
+
+- La cadena `next` de coedges **no ordena** el recorrido del loop de forma
+  fiable; hay que reconstruir el ciclo encadenando polilíneas por coincidencia
+  de extremos (los vértices compartidos son exactos).
+- El orden de los loops de una cara **no garantiza** el exterior primero; hay
+  que ordenarlos por tamaño (bbox) — el exterior contiene a los agujeros.
+
+### 2.4 Geometría de curvas
+
+- **`straight`**: posiciones = punto base + dirección; params = distancia.
+- **`ellipse`**: posiciones = centro, normal, eje mayor (|eje| = a);
+  el primer escalar tras las 3 posiciones es el *ratio* menor/mayor.
+  Los parámetros del edge (t₀, t₁) son **ángulos**:
+  `P(t) = centro + eje·cos t + (n̂×êje)·(a·ratio)·sin t`.
+- **`intcurve`/`exact_int_cur`, `spring_int_cur`, `par_int_cur`**: B-splines
+  (ver §2.5). Las *spring* son los bordes de contacto de los fillets.
+
+### 2.5 B-splines: `nubs` (no racional) y `nurbs` (racional)
+
+Layout del bloque: `grado (int)`, `flag (int)`, `nº de nudos distintos (int)`,
+luego pares `(valor double, multiplicidad int)`, y los **puntos de control**:
+ternas (x,y,z) en `nubs`, cuádruplas (x,y,z,w) en `nurbs`.
+
+Convenciones **no estándar** descubiertas (críticas):
+
+- `flag=0` → curva abierta *clamped*, pero las multiplicidades de los nudos
+  extremos se guardan como `grado` en vez de `grado+1`: hay que **sumar 1 a
+  cada extremo** para reconstruir el vector de nudos. Validado: de Boor
+  reproduce los extremos de todas las aristas spline con error 0.
+- `flag=2` → curva **cerrada/periódica**. La reconstrucción *clamped* (+1 de
+  multiplicidad en cada extremo) sigue siendo válida — la suma de
+  multiplicidades coincide con los puntos de control almacenados y la curva
+  cierra exacta (gap ~10⁻¹⁵) — pero las aristas sobre estas curvas pueden
+  llevar **parámetros fuera del dominio** almacenado (p.ej. `[-T, 0]` con
+  dominio `[0, T]`): hay que envolverlos **módulo el periodo** T =
+  `nudo_final − nudo_inicial` antes de evaluar.
+- El número de puntos de control **no se almacena**; se deriva de
+  `len(nudos) − grado − 1` (evita leer de más hacia campos posteriores, como
+  la tolerancia de ajuste).
+
+### 2.6 Geometría de superficies
+
+- **`plane`**: posiciones = origen, normal, referencia u.
+- **`cone`** (incluye cilindros): posiciones = origen, eje, eje mayor
+  (|eje mayor| = r₀); tras el ratio vienen `seno` y `coseno` del semiángulo.
+  Parametrización: u = ángulo, v = distancia axial, `r(v) = r₀ + v·(sen/cos)`
+  (el signo del taper se calibra empíricamente con el contorno).
+  Validado: residuo < 6·10⁻⁶ en todos los puntos de contorno de la muestra.
+- **`cyl_spl_sur`**: superficie de **extrusión** — una directriz B-spline
+  barrida por un eje: `S(u,v) = C(u) + v·êje`. El eje es la tupla XYZ unitaria
+  tras la definición; la directriz puede ser inline o `ref` (ver §2.7).
+- **`srf_srf_v_bl_spl_sur`**: **blend/fillet** entre dos superficies soporte
+  (que van embebidas en el record como `blend_support_surface`, p.ej. un
+  `cyl_spl_sur` y un `cone`). El record contiene la **curva del centro de la
+  bola** como B-spline 3D a distancia constante = radio de ambos perfiles de
+  contacto (curvas *spring*), más una B-spline **2D** periódica (ley del
+  blend). Ojo: la superficie que Fusion evalúa/exporta **no** son arcos
+  circulares de bola rodante — sus secciones transversales son mucho más
+  planas (flecha ≈ 3 % de la cuerda en la muestra, frente al 21 % de un arco
+  circular). La aproximación fiel al OBJ de referencia es la **franja reglada**
+  entre puntos correspondientes de los dos perfiles de contacto.
+
+### 2.7 Geometría compartida: el pool de `ref N`
+
+ASM comparte datos de subtipo (curvas `*_int_cur`/`*_par_cur` y superficies
+`*_spl_sur`). Regla de numeración (descubierta y validada geométricamente):
+
+> Cada **definición** de subtipo — todo `TypeName` cuyo nombre termina en
+> `_cur` o `_sur` — recibe el siguiente índice (base 0) en orden de aparición
+> en el flujo, **excluyendo** los records `ATTRIB_CUSTOM`. Un valor `ref N`
+> posterior referencia la definición N.
+
+La primera vez que se usa un objeto compartido se serializa **inline**
+(a menudo dentro de un `pcurve`); los usos siguientes emiten `ref N`.
+Validación: 59 de 61 caras curvas de la muestra resuelven a superficies con
+residuo < 10⁻³ (las 2 restantes son blends, sin evaluador cerrado).
+
+### 2.8 `pcurve`
+
+Curva en el espacio paramétrico (u,v) de una superficie (`exp_par_cur` +
+`nubs` 2D). El primer `pcurve` sobre una superficie incluye la definición
+completa de ésta (es su primera serialización; ver §2.7).
 
 ### 2.4 Atributos
 
@@ -156,8 +241,12 @@ geometría y el importador los ignora.
 |------------------------------------|--------|
 | Contenedor ZIP + manifiestos       | ✅ Documentado |
 | Tokenización ASM SAB               | ✅ Parser completo (`sab.py`) |
-| Grafo topológico B-rep             | ✅ Se parsea (2816 records) |
-| Geometría de superficies/curvas    | 🚧 En progreso (`brep.py`) |
-| Teselación de caras recortadas     | 🚧 Pendiente (`tessellate.py`) |
+| Grafo topológico B-rep             | ✅ Offsets verificados (§2.3); cuerpos/caras/loops/aristas |
+| Curvas (recta, elipse, nubs/nurbs) | ✅ de Boor validado; periódicas (flag=2) con wrap de parámetros |
+| Superficies (plano, cono, extrusión)| ✅ Evaluación analítica, residual < 6·10⁻⁶ |
+| Superficies blend (fillets)        | ✅ Franja reglada entre perfiles de contacto (§2.6) |
+| Pool de referencias `ref N`        | ✅ Regla validada (§2.7) |
+| Teselación de caras recortadas     | ✅ CDT en espacio paramétrico + loft (`tessellate.py`) |
+| Fidelidad vs. OBJ de referencia    | ✅ Área 76.668 / 76.608 cm² (0.08 %); desviación media 10–26 µm, máx 140 µm; malla estanca (0 aristas no-manifold) |
 | `BulkStream.dat` (árbol/materiales)| 🔜 Parcial (strings) |
-| Operador de importación Blender    | 🔜 Pendiente (`importer.py`) |
+| Operador de importación Blender    | ✅ Funcional (`importer.py`): escala, dedup de cuerpos, soldadura |

@@ -21,10 +21,11 @@ import math
 from dataclasses import dataclass, field
 
 try:  # package import (inside Blender add-on)
-    from . import sab, nurbs
+    from . import sab, nurbs, surfaces
 except ImportError:  # standalone (tests)
     import sab
     import nurbs
+    import surfaces
 
 
 # --- small vector helpers -------------------------------------------------
@@ -79,6 +80,40 @@ def _ratio_value(rec) -> float:
     return 1.0
 
 
+def _chain_polylines(polys):
+    """Order/orient edge polylines into a connected cycle.
+
+    Starts from the first polyline and repeatedly appends the remaining one
+    whose closer endpoint matches the current chain end, flipping it when its
+    tail (not head) connects.  Robust to wrong stored senses and scrambled
+    coedge order because loop edges share exact vertex coordinates.
+    """
+    if len(polys) <= 1:
+        return list(polys)
+    remaining = list(polys[1:])
+    chain = [list(polys[0])]
+    while remaining:
+        end = chain[-1][-1]
+        best_i, best_d, best_flip = 0, float("inf"), False
+        for i, poly in enumerate(remaining):
+            d_head = _length(_sub(end, poly[0]))
+            d_tail = _length(_sub(end, poly[-1]))
+            if d_head < best_d:
+                best_i, best_d, best_flip = i, d_head, False
+            if d_tail < best_d:
+                best_i, best_d, best_flip = i, d_tail, True
+        poly = remaining.pop(best_i)
+        chain.append(list(reversed(poly)) if best_flip else list(poly))
+    return chain
+
+
+def _bbox_diag(ring):
+    """Squared bounding-box diagonal of a point ring (for outer/hole sorting)."""
+    lo = [min(p[c] for p in ring) for c in range(3)]
+    hi = [max(p[c] for p in ring) for c in range(3)]
+    return sum((hi[c] - lo[c]) ** 2 for c in range(3))
+
+
 def _surface_axis(surf):
     """Return the extrusion/revolution axis (unit) of a cone or cyl_spl_sur.
 
@@ -107,6 +142,7 @@ class Face:
     normal: tuple | None = None             # analytic surface normal, if known
     axis: tuple | None = None               # extrusion/revolution axis (unit), if any
     loop_edges: list = field(default_factory=list)  # per loop: list of edge polylines
+    surface: object = None                  # evaluable surface (surfaces.py) or None
 
 
 @dataclass
@@ -120,6 +156,7 @@ class Brep:
         self.f = sabfile
         self.deviation = deviation        # max chord error in model units
         self.min_arc_segments = min_arc_segments  # per full 2*pi turn
+        self.pool = surfaces.RefPool(sabfile)  # shared-geometry registry
 
     # -- low level helpers --------------------------------------------------
     def _rec(self, ref):
@@ -206,19 +243,31 @@ class Brep:
         """
         parsed = nurbs.curve_from_record(curve)
         if parsed is None:
+            # shared curve: its data lives in an earlier definition (ref N)
+            for j, v in enumerate(curve.values):
+                if isinstance(v, sab.TypeName) and v.name == "ref":
+                    tgt = self.pool.get(curve.values[j + 1]
+                                        if j + 1 < len(curve.values) else None)
+                    if tgt is not None:
+                        parsed = self.pool.curve_at(tgt[0], tgt[1])
+                    break
+        if parsed is None:
             return None
-        deg, U, P = parsed
+        deg, U, P, period = parsed
         span = abs(t1 - t0)
         nseg = max(6, min(200, int(math.ceil(span * 8)) + len(P)))
-        pts = nurbs.sample_curve(deg, U, P, t0, t1, nseg)
-        if v0 is not None and v1 is not None:
-            lo = [min(v0[c], v1[c]) for c in range(3)]
-            hi = [max(v0[c], v1[c]) for c in range(3)]
-            pad = max(1e-3, 2.0 * _length(_sub(v1, v0)))
-            for p in pts:
-                for c in range(3):
-                    if p[c] < lo[c] - pad or p[c] > hi[c] + pad:
-                        return None    # sample escaped the endpoint box -> reject
+        pts = nurbs.sample_curve(deg, U, P, t0, t1, nseg, period=period)
+        # A B-spline lies inside the convex hull of its control points, so the
+        # control-net bounding box (plus a hair) is a mathematically sound
+        # sanity net against a mis-parsed net.  (An endpoint-based box would
+        # wrongly reject closed edges, whose chord is zero.)
+        cart = [(q[0] / q[3], q[1] / q[3], q[2] / q[3]) for q in P]
+        lo = [min(q[c] for q in cart) - 1e-6 for c in range(3)]
+        hi = [max(q[c] for q in cart) + 1e-6 for c in range(3)]
+        for p in pts:
+            for c in range(3):
+                if p[c] < lo[c] or p[c] > hi[c]:
+                    return None
         return pts
 
     def _sample_edge(self, edge, reverse):
@@ -262,8 +311,7 @@ class Brep:
         from rail edges on swept faces.
         """
         coedges = self._walk(self._ref_at(loop, LOOP_COEDGE), COEDGE_NEXT)
-        ring = []
-        edges = []
+        polys = []
         for ce in coedges:
             edge = self._ref_at(ce, COEDGE_EDGE)
             if edge is None:
@@ -271,9 +319,23 @@ class Brep:
             sense = ce.values[COEDGE_SENSE] if COEDGE_SENSE < len(ce.values) else False
             poly = self._sample_edge(edge, reverse=(sense is True))
             if len(poly) >= 2:
-                edges.append(poly)
+                polys.append(poly)
+        # The coedge 'next' chain does not reliably order the traversal, so
+        # rebuild the cycle by greedy endpoint chaining (loop edges share
+        # exact vertex positions, making nearest-endpoint matching robust).
+        edges = _chain_polylines(polys)
+        ring = []
+        for poly in edges:
             ring.extend(poly[:-1] if len(poly) > 1 else poly)
-        return ring, edges
+        # drop consecutive (near-)duplicate points; they create degenerate
+        # slivers that break downstream triangulation
+        clean = []
+        for p in ring:
+            if not clean or _length(_sub(p, clean[-1])) > 1e-7:
+                clean.append(p)
+        if len(clean) > 1 and _length(_sub(clean[0], clean[-1])) <= 1e-7:
+            clean.pop()
+        return clean, edges
 
     def _face(self, face_rec):
         surf = self._ref_at(face_rec, FACE_SURFACE)
@@ -287,8 +349,21 @@ class Brep:
             if len(ring) >= 3:
                 rings.append(ring)
                 loop_edges.append(edges)
+        # The outer boundary must come first; inner loops are holes.  ASM does
+        # not guarantee outer-first order, so sort by bounding-box size (the
+        # outer loop encloses -- hence is larger than -- every hole).
+        if len(rings) > 1:
+            order = sorted(range(len(rings)),
+                           key=lambda i: _bbox_diag(rings[i]), reverse=True)
+            rings = [rings[i] for i in order]
+            loop_edges = [loop_edges[i] for i in order]
+        surface = None
+        if kind != "plane":
+            surface = surfaces.from_record(surf, self.pool)
+            if surface is not None and hasattr(surface, "calibrate"):
+                surface.calibrate([p for r in rings for p in r])
         return Face(surface_kind=kind, loops=rings, normal=normal,
-                    axis=axis, loop_edges=loop_edges)
+                    axis=axis, loop_edges=loop_edges, surface=surface)
 
     # -- public -------------------------------------------------------------
     def bodies(self):
