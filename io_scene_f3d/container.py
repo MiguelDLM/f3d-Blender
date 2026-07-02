@@ -44,7 +44,17 @@ def open_f3d(path: str) -> F3DContainer:
     zf = zipfile.ZipFile(path, "r")
     names = zf.namelist()
 
-    breps = sorted(
+    # Newer files ship two ASM parts: BREP.*.smbh holds the CURRENT model
+    # (bodies at their final world positions), while BREP.*.smb holds the
+    # per-feature design history (dozens of intermediate body snapshots).
+    # Prefer the model; fall back to the history stream for older files
+    # that only carry an .smb (whose last snapshots are the final bodies).
+    model = sorted(
+        n for n in names
+        if n.rsplit("/", 1)[-1].upper().startswith("BREP.")
+        and n.lower().endswith(".smbh")
+    )
+    breps = model or sorted(
         n for n in names
         if n.rsplit("/", 1)[-1].upper().startswith("BREP.")
         and n.lower().endswith(".smb")

@@ -112,6 +112,45 @@ class Cone:
         return _length(_sub(self.eval(u, v), p))
 
 
+class Torus:
+    """ACIS torus: tube of radius ``r`` around a circle of radius ``R``.
+
+    ``u`` is the angle around the main axis, ``v`` the angle around the tube
+    (0 at the outer equator, +pi/2 towards the axis tip).  Handles lemon/apple
+    tori (R < r) too -- the same equations apply.
+    """
+
+    periodic_u = True
+
+    def __init__(self, center, axis, R, r, refdir):
+        self.center = center
+        self.axis = _unit(axis)
+        self.R, self.r = R, r
+        self.M = _unit(refdir)
+        self.N = _unit(_cross(self.axis, self.M))
+
+    def eval(self, u, v):
+        rad = self.R + self.r * math.cos(v)
+        cu, su = math.cos(u), math.sin(u)
+        return _add3(self.center,
+                     _scale(self.axis, self.r * math.sin(v)),
+                     (rad * (cu * self.M[0] + su * self.N[0]),
+                      rad * (cu * self.M[1] + su * self.N[1]),
+                      rad * (cu * self.M[2] + su * self.N[2])))
+
+    def project(self, p):
+        d = _sub(p, self.center)
+        h = _dot(d, self.axis)
+        rad = _sub(d, _scale(self.axis, h))
+        u = math.atan2(_dot(rad, self.N), _dot(rad, self.M))
+        v = math.atan2(h, _length(rad) - self.R)
+        return (u, v)
+
+    def residual(self, p):
+        u, v = self.project(p)
+        return _length(_sub(self.eval(u, v), p))
+
+
 class ExtrudedCurve:
     """``cyl_spl_sur``: B-spline directrix ``C(u)`` extruded along ``axis``.
 
@@ -289,6 +328,27 @@ def _cone_from(rec):
     return Cone(origin, axis, major, sine, cosine)
 
 
+def _torus_from(rec):
+    """Build a :class:`Torus`: positions = center, axis, refdir; then R, r."""
+    pos = rec.positions()
+    if len(pos) < 3:
+        return None
+    center, axis, refdir = pos[0], pos[1], pos[2]
+    # R and r are the two numbers between the axis and refdir tuples
+    nums = []
+    seen = 0
+    for v in rec.values:
+        if isinstance(v, tuple):
+            seen += 1
+            if seen >= 3:
+                break
+        elif seen == 2 and isinstance(v, (int, float)) and not isinstance(v, bool):
+            nums.append(float(v))
+    if len(nums) < 2:
+        return None
+    return Torus(center, axis, nums[0], nums[1], refdir)
+
+
 def from_record(surf_rec, pool):
     """Build an evaluable surface from a face's surface record.
 
@@ -300,6 +360,8 @@ def from_record(surf_rec, pool):
         return None
     if surf_rec.name == "cone":
         return _cone_from(surf_rec)
+    if surf_rec.name == "torus":
+        return _torus_from(surf_rec)
     names = _typenames(surf_rec)
     # dispatch on the FIRST *_spl_sur name: that is the face's own surface;
     # later ones are nested support surfaces (e.g. a blend's base cylinder)

@@ -91,8 +91,30 @@ Por eso `0x0D` **no** sirve como delimitador de record; sólo `0x11` lo hace.
 El nombre "de tipo" útil es el **último** (la geometría concreta).
 
 Los punteros (`0x0C`) referencian records por su **índice ordinal** en el flujo
-(0-based, en orden de aparición). El parser (`io_scene_f3d/sab.py`) construye
-la lista de records y resuelve estos índices.
+(0-based, en orden de aparición). **Ojo**: la numeración del escritor **no
+cuenta** los records estructurales `delta_state` ni `Begin` (sí cuenta `End`).
+En los `.smb` simples no aparecen y el ordinal coincide con la posición física;
+en los `.smbh` (con diario de historial intercalado) hay que saltarlos al
+resolver — validado: con esa regla el 100 % de los punteros cara→superficie
+del Perchero resuelven a superficies (con numeración física, solo el 67 %).
+
+#### `.smb` vs `.smbh`
+
+Los `.f3d` recientes traen **dos** blobs ASM en `Breps.BlobParts/`:
+
+- **`BREP.<guid>.smbh`** — el **modelo actual**: los cuerpos del árbol de
+  diseño en sus **posiciones finales** (tras las features de mover/copiar),
+  seguidos de un diario de historial (`Begin`/`delta_state`/`End`). Es el
+  que hay que importar.
+- **`BREP.<guid>.smb`** — el **historial de diseño**: una instantánea del
+  cuerpo tras cada feature del timeline (cientos de cuerpos intermedios, en
+  coordenadas de modelado, sin las transformaciones aplicadas).
+
+Los archivos antiguos (p.ej. la muestra del soporte de cortinas) sólo tienen
+`.smb` y ahí las últimas instantáneas son los cuerpos finales. El importador
+prefiere `.smbh` si existe. Los cuerpos ASM llevan además un puntero a un
+record `transform` (3 ejes + traslación + escala) en `body[6]`; en las
+muestras analizadas todos son identidad.
 
 ### 2.2 Grafo topológico (B-rep)
 
@@ -195,6 +217,11 @@ Convenciones **no estándar** descubiertas (críticas):
 - **`cyl_spl_sur`**: superficie de **extrusión** — una directriz B-spline
   barrida por un eje: `S(u,v) = C(u) + v·êje`. El eje es la tupla XYZ unitaria
   tras la definición; la directriz puede ser inline o `ref` (ver §2.7).
+- **`torus`** (aparece en los `.smbh`, ASM 229): layout posicional
+  `[6]=centro, [7]=eje, [8]=radio mayor R, [9]=radio menor r,
+  [10]=dirección de referencia`. `S(u,v) = C + (R + r·cos v)·(cos u·M̂ +
+  sin u·N̂) + r·sin v·êje`. R < r es válido (toro tipo limón/manzana en
+  fillets de esquina). Validado: residuo < 1.4·10⁻⁴ en 102 caras.
 - **`srf_srf_v_bl_spl_sur`**: **blend/fillet** entre dos superficies soporte
   (que van embebidas en el record como `blend_support_surface`, p.ej. un
   `cyl_spl_sur` y un `cone`). El record contiene la **curva del centro de la
@@ -243,7 +270,8 @@ geometría y el importador los ignora.
 | Tokenización ASM SAB               | ✅ Parser completo (`sab.py`) |
 | Grafo topológico B-rep             | ✅ Offsets verificados (§2.3); cuerpos/caras/loops/aristas |
 | Curvas (recta, elipse, nubs/nurbs) | ✅ de Boor validado; periódicas (flag=2) con wrap de parámetros |
-| Superficies (plano, cono, extrusión)| ✅ Evaluación analítica, residual < 6·10⁻⁶ |
+| Superficies (plano, cono, toro, extrusión)| ✅ Evaluación analítica, residual < 6·10⁻⁶ (toro < 1.4·10⁻⁴) |
+| Modelo vs. historial (`.smbh`/`.smb`) | ✅ Se importa el modelo actual; regla de ordinales con `delta_state`/`Begin` |
 | Superficies blend (fillets)        | ✅ Franja reglada entre perfiles de contacto (§2.6) |
 | Pool de referencias `ref N`        | ✅ Regla validada (§2.7) |
 | Teselación de caras recortadas     | ✅ CDT en espacio paramétrico + loft (`tessellate.py`) |

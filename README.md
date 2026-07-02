@@ -15,7 +15,7 @@ formato.
 | Contenedor ZIP | `io_scene_f3d/container.py` | ✅ |
 | Tokenizer ASM SAB | `io_scene_f3d/sab.py` | ✅ |
 | Reconstrucción topológica B-rep | `io_scene_f3d/brep.py` | ✅ |
-| Superficies analíticas (cono, extrusión, ref pool) | `io_scene_f3d/surfaces.py` | ✅ |
+| Superficies analíticas (cono, toro, extrusión, ref pool) | `io_scene_f3d/surfaces.py` | ✅ |
 | Curvas B-spline (de Boor, abiertas y periódicas) | `io_scene_f3d/nurbs.py` | ✅ |
 | Teselación (CDT paramétrico + loft) | `io_scene_f3d/tessellate.py` | ✅ |
 | Operador de importación | `io_scene_f3d/importer.py` | ✅ |

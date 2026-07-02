@@ -124,7 +124,7 @@ def _surface_axis(surf):
     """
     if surf is None:
         return None
-    if surf.name == "cone":
+    if surf.name in ("cone", "torus"):
         pos = surf.positions()
         return _unit(pos[1]) if len(pos) >= 2 else None
     names = [v.name for v in surf.values if isinstance(v, sab.TypeName)]
@@ -276,6 +276,8 @@ class Brep:
         The first point is the coedge's start vertex, the last its end vertex;
         interior points come from evaluating the edge's curve.
         """
+        if edge.name != "edge" or len(edge.values) <= max(EDGE_VEND + 1, EDGE_CURVE):
+            return []          # wire/degenerate topology (no sampleable curve)
         v0 = self._vertex_point(self._ref_at(edge, EDGE_VSTART))
         v1 = self._vertex_point(self._ref_at(edge, EDGE_VEND))
         t0 = edge.values[5] if isinstance(edge.values[5], float) else 0.0
@@ -340,7 +342,7 @@ class Brep:
     def _face(self, face_rec):
         surf = self._ref_at(face_rec, FACE_SURFACE)
         kind, normal = self._surface_info(surf)
-        axis = _surface_axis(surf) if kind in ("cone", "spline") else None
+        axis = _surface_axis(surf) if kind in ("cone", "torus", "spline") else None
         loops = self._walk(self._ref_at(face_rec, FACE_LOOP), LOOP_NEXT)
         rings = []
         loop_edges = []
@@ -374,9 +376,17 @@ class Brep:
         ``face -> shell -> lump -> body`` and grouped by the owning body.  This
         needs only pointers that were confirmed against the sample.
         """
+        # Only the LIVE entity section counts: history-journal files (.smbh)
+        # append a Begin/delta_state journal after the first `End` record
+        # whose face records are stale pre-edit versions of the same bodies
+        # (their owner chains still point at the live shells).
+        live_end = next((r.index for r in self.f.records if r.name == "End"),
+                        len(self.f.records))
         groups: dict = {}
         order: list = []
         for face_rec in self.f.by_type("face"):
+            if face_rec.index >= live_end:
+                continue
             shell = self._ref_at(face_rec, FACE_SHELL)
             lump = self._ref_at(shell, SHELL_LUMP)
             body = self._ref_at(lump, LUMP_BODY)

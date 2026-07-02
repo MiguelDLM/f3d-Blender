@@ -104,15 +104,31 @@ class Record:
 class SabFile:
     header: dict
     records: list
+    _ordinals: list = field(default=None, repr=False)
 
     def by_type(self, name: str) -> list:
         return [r for r in self.records if r.name == name]
 
     def resolve(self, ref) -> "Record | None":
+        """Resolve a pointer to its record.
+
+        Pointer ordinals do NOT count every physical record: history journal
+        files (``.smbh``) interleave ``delta_state`` and ``Begin`` markers
+        that the writer skips when numbering entities (validated: with them
+        excluded, 100% of face->surface pointers resolve to surfaces).  Files
+        without such markers are unaffected (the mapping is the identity).
+        """
         idx = ref.index if isinstance(ref, Ref) else ref
-        if idx is None or idx < 0 or idx >= len(self.records):
+        if idx is None or idx < 0:
             return None
-        return self.records[idx]
+        if self._ordinals is None:
+            self._ordinals = [
+                r for r in self.records
+                if r.name not in ("delta_state", "Begin")
+            ]
+        if idx >= len(self._ordinals):
+            return None
+        return self._ordinals[idx]
 
 
 class _Reader:
