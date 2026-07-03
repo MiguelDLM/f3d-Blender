@@ -157,6 +157,7 @@ records de cada clase:
 | Record  | Posición → destino |
 |---------|--------------------|
 | body    | `[4]`→lump |
+| body    | `[1]`→attrib, `[2]`=tag entero de entidad, `[4]`→lump, `[6]`→transform |
 | lump    | `[5]`→shell, `[6]`→body |
 | shell   | `[6]`→face, `[8]`→lump |
 | face    | `[4]`→next face, `[5]`→loop, `[6]`→shell, `[8]`→surface |
