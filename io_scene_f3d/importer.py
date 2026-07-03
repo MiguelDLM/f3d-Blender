@@ -61,7 +61,8 @@ def _weld_t_junctions(bm, tol):
                 hits.append((t, v))
         if not hits:
             continue
-        hits.sort(reverse=True)     # split from the far end: keeps t valid
+        # sort by t only -- ties must not fall through to BMVert comparison
+        hits.sort(key=lambda h: h[0], reverse=True)  # far end first
         cur = e
         v0 = e.verts[0]
         prev_t = 1.0

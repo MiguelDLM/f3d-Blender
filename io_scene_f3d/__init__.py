@@ -43,7 +43,7 @@ if _HAVE_BPY:
         deviation: FloatProperty(
             name="Chord deviation",
             description="Max distance between a curved surface and its mesh (in model units). Smaller = finer mesh",
-            default=0.1, min=0.001, max=10.0,
+            default=0.02, min=0.001, max=10.0,
         )
         global_scale: FloatProperty(
             name="Scale",

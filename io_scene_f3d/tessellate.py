@@ -507,6 +507,76 @@ def _point_in_poly(x, y, poly):
     return inside
 
 
+def _cut_full_wrap(surf, uv_loops, rings3, w_u, full):
+    """Join two full-period rings into one simple uv polygon via a seam.
+
+    Ring A is traversed with increasing u, ring B (rotated to start where A
+    ends, one period up) with decreasing u; the two are connected by a right
+    seam chain and its exact copy one period down on the left, so both seam
+    sides evaluate to identical 3D points and the mesh welds shut.
+    Returns ``(outer_uv, outer_3d)`` with the lists aligned point-for-point.
+    """
+    two_pi = 2 * math.pi
+    ia, ib = full
+    A = list(uv_loops[ia])
+    B = list(uv_loops[ib])
+    A3 = list(rings3[ia])
+    B3 = list(rings3[ib])
+    if w_u[ia] < 0:
+        A.reverse()
+        A3.reverse()
+    if w_u[ib] > 0:
+        B.reverse()
+        B3.reverse()
+    # cut where no hole is: rotate A to start at the boundary point whose u
+    # (mod 2*pi) is furthest from every hole sample, so the seam line does
+    # not cross a hole ring (which would make the outer polygon invalid)
+    hole_us = [u for i, uv in enumerate(uv_loops) if i not in full
+               for (u, _v) in uv]
+    if hole_us:
+        def clearance(u):
+            return min(abs(_wrap_pi(u - hu)) for hu in hole_us)
+        j = max(range(len(A)), key=lambda i: clearance(A[i][0]))
+        if j:
+            A = A[j:] + [(u + two_pi, v) for (u, v) in A[:j]]
+            A3 = A3[j:] + A3[:j]
+    # bring B onto A's period branch
+    mu_a = sum(p[0] for p in A) / len(A)
+    mu_b = sum(p[0] for p in B) / len(B)
+    k = round((mu_a - mu_b) / two_pi)
+    if k:
+        B = [(u + two_pi * k, v) for (u, v) in B]
+    # rotate B (winds downward) so it starts near A's end, one period up
+    target = A[0][0] + two_pi
+    j = min(range(len(B)), key=lambda i: abs(B[i][0] - target))
+    B = B[j:] + [(u - two_pi, v) for (u, v) in B[:j]]
+    B3 = B3[j:] + B3[:j]
+
+    a_end = (A[0][0] + two_pi, A[0][1])     # same 3D point as A[0]
+    b_end = (B[0][0] - two_pi, B[0][1])     # same 3D point as B[0]
+
+    # seam samples at ring-A boundary density; evaluated once and shared by
+    # both seam sides so they weld exactly
+    seg = sum(_dist(A3[i], A3[i + 1]) for i in range(len(A3) - 1))
+    seg /= max(1, len(A3) - 1)
+    span = _dist(surf.eval(*a_end), surf.eval(*B[0]))
+    m = int(min(200, span / max(seg, 1e-9)))
+    seam_uv = []
+    seam_3d = []
+    for t in range(1, m + 1):
+        f = t / (m + 1)
+        uv = (a_end[0] + (B[0][0] - a_end[0]) * f,
+              a_end[1] + (B[0][1] - a_end[1]) * f)
+        seam_uv.append(uv)
+        seam_3d.append(surf.eval(*uv))
+
+    outer_uv = (A + [a_end] + seam_uv + B + [b_end]
+                + [(u - two_pi, v) for (u, v) in reversed(seam_uv)])
+    outer_3d = (A3 + [A3[0]] + seam_3d + B3 + [B3[0]]
+                + list(reversed(seam_3d)))
+    return outer_uv, outer_3d
+
+
 def _tessellate_on_surface(face):
     """Exact tessellation of a face with an evaluable surface.
 
@@ -531,6 +601,7 @@ def _tessellate_on_surface(face):
     # --- project rings to (u, v), unwrapping periodic u/v along the loop ---
     periodic_v = getattr(surf, "periodic_v", False)
     uv_loops = []
+    w_u = []
     for ring in face.loops:
         uv = []
         prev = None
@@ -543,14 +614,16 @@ def _tessellate_on_surface(face):
                     v = prev[1] + _wrap_pi(v - prev[1])
             uv.append((u, v))
             prev = (u, v)
+        wu = wv = 0.0
         if len(uv) > 1:
-            for k, per in ((0, surf.periodic_u), (1, periodic_v)):
-                if not per:
-                    continue
-                winding = (uv[-1][k] + _wrap_pi(uv[0][k] - uv[-1][k])) - uv[0][k]
-                if abs(winding) > math.pi:
-                    return None  # loop wraps the full period -> loft instead
+            if surf.periodic_u:
+                wu = (uv[-1][0] + _wrap_pi(uv[0][0] - uv[-1][0])) - uv[0][0]
+            if periodic_v:
+                wv = (uv[-1][1] + _wrap_pi(uv[0][1] - uv[-1][1])) - uv[0][1]
+        if abs(wv) > math.pi:
+            return None      # loop wraps the full v period -> loft instead
         uv_loops.append(uv)
+        w_u.append(wu)
 
     # Rings unwrap independently, so a hole may land one period away from
     # the outer loop; shift each ring by whole periods onto the first ring.
@@ -569,10 +642,39 @@ def _tessellate_on_surface(face):
             if du or dv:
                 uv_loops[li] = [(u + du, v + dv) for (u, v) in uv]
 
+    # --- full-period faces (a tube wall): cut the seam open ---
+    # A face bounded by two rings that each wrap the whole u period (e.g. a
+    # cylinder wall with its two end circles, possibly with holes where other
+    # parts join) has no simple uv polygon.  Cut it at one u value: join the
+    # two rings with two seam chains that share the same 3D points, so the
+    # mesh welds shut across the cut.
+    full = [i for i, w in enumerate(w_u) if abs(w) > math.pi]
+    if full:
+        if not surf.periodic_u or len(full) != 2:
+            return None      # single seam-cut rings are handled by the loft
+        cut = _cut_full_wrap(surf, uv_loops, face.loops, w_u, full)
+        if cut is None:
+            return None
+        outer_uv, outer_3d = cut
+        loops_uv = [outer_uv]
+        loops_3d = [outer_3d]
+        dom_u = sum(p[0] for p in outer_uv) / len(outer_uv)
+        for i in range(len(uv_loops)):
+            if i in full:
+                continue
+            uv = uv_loops[i]
+            mu = sum(p[0] for p in uv) / len(uv)
+            k = round((dom_u - mu) / (2 * math.pi))
+            loops_uv.append([(u + 2 * math.pi * k, v) for (u, v) in uv])
+            loops_3d.append(list(face.loops[i]))
+    else:
+        loops_uv = uv_loops
+        loops_3d = [list(r) for r in face.loops]
+
     # --- scale u and v to be roughly isometric with 3D distance ---
     def _axis_scale(k):
         ratios = []
-        for uv, ring in zip(uv_loops, face.loops):
+        for uv, ring in zip(loops_uv, loops_3d):
             for i in range(len(uv) - 1):
                 dp = abs(uv[i + 1][k] - uv[i][k])
                 d3 = _dist(ring[i], ring[i + 1])
@@ -588,7 +690,7 @@ def _tessellate_on_surface(face):
     exact3d = []
     edges = []
     polys2 = []
-    for uv, ring in zip(uv_loops, face.loops):
+    for uv, ring in zip(loops_uv, loops_3d):
         base = len(pts2)
         n = len(uv)
         pts2.extend(Vector((u * su, v * sv)) for (u, v) in uv)
