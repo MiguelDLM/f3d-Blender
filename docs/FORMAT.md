@@ -172,13 +172,17 @@ records de cada clase:
   de extremos (los vértices compartidos son exactos).
 - El orden de los loops de una cara **no garantiza** el exterior primero; hay
   que ordenarlos por tamaño (bbox) — el exterior contiene a los agujeros.
-- El bool `edge[10]` es el **sentido de la arista respecto a su curva**:
-  `True` = forward, `False` = invertida. En una arista invertida los
-  parámetros t₀/t₁ se refieren a la **parametrización invertida** `t → -t`:
-  hay que **negarlos** antes de evaluar la curva. Si no se negan, los arcos
-  circulares se muestrean en el **cuadrante especular** (validado en el
-  rebaje "ojo de cerradura" del Perchero: arcos de esquina que daban 1.56 mm
-  de error se corrigen exactamente al negar).
+- Una arista puede recorrer su curva **en contra**: entonces t₀/t₁ se
+  refieren a la parametrización invertida `t → -t` y hay que **negarlos**
+  antes de evaluar. Si no, los arcos circulares se muestrean en el
+  **cuadrante especular** (arcos del rebaje "ojo de cerradura" del Perchero
+  con 1.56 mm de error) y las intcurve extrapolan fuera de dominio (las
+  paredes de las letras en relieve caían al fallback recto). El bool
+  `edge[10]` **no es fiable** como flag de sentido: marca `False` algunas
+  aristas invertidas, pero otras (intcurves con params fuera de dominio)
+  llevan `True`. Regla robusta validada: muestrear con params directos y
+  negados y quedarse con el candidato que **reproduce los vértices** de la
+  arista (los vértices son exactos, el error del candidato correcto es 0).
 
 ### 2.4 Geometría de curvas
 

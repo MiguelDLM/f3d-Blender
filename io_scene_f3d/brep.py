@@ -157,6 +157,7 @@ class Brep:
         self.deviation = deviation        # max chord error in model units
         self.min_arc_segments = min_arc_segments  # per full 2*pi turn
         self.pool = surfaces.RefPool(sabfile)  # shared-geometry registry
+        self._edge_pts = {}               # edge record index -> forward polyline
 
     # -- low level helpers --------------------------------------------------
     def _rec(self, ref):
@@ -278,24 +279,48 @@ class Brep:
         """
         if edge.name != "edge" or len(edge.values) <= max(EDGE_VEND + 1, EDGE_CURVE):
             return []          # wire/degenerate topology (no sampleable curve)
+        cached = self._edge_pts.get(edge.index)
+        if cached is not None:
+            return list(reversed(cached)) if reverse else list(cached)
         v0 = self._vertex_point(self._ref_at(edge, EDGE_VSTART))
         v1 = self._vertex_point(self._ref_at(edge, EDGE_VEND))
         t0 = edge.values[5] if isinstance(edge.values[5], float) else 0.0
         t1 = edge.values[7] if isinstance(edge.values[7], float) else 1.0
-        # values[10] is the edge sense: True = forward, False = the edge runs
-        # against its curve, and its params refer to the reversed
-        # parametrisation t -> -t (validated: mirrored-quadrant arcs on the
-        # Perchero keyhole pocket resolve only with negated params).
-        if len(edge.values) > 10 and edge.values[10] is False:
-            t0, t1 = -t0, -t1
         curve = self._ref_at(edge, EDGE_CURVE)
         kind = curve.name if curve is not None else "straight"
 
+        # An edge that runs against its curve stores params in the REVERSED
+        # parametrisation t -> -t and must be negated before evaluating
+        # (un-negated, arcs sample the mirrored quadrant).  The sense bool at
+        # values[10] flags some but not all such edges (intcurve edges with
+        # params outside the curve domain carry True), so instead of trusting
+        # it, both mappings are sampled and validated against the edge's own
+        # vertices; the bool only orders which candidate is tried first.
+        cands = [(t0, t1), (-t0, -t1)]
+        if len(edge.values) > 10 and edge.values[10] is False:
+            cands.reverse()
+
         pts = None
-        if kind == "ellipse":
-            pts = self._sample_ellipse(curve, t0, t1)
-        elif kind in ("intcurve", "curve"):
-            pts = self._sample_spline_curve(curve, t0, t1, v0, v1)
+        if kind in ("ellipse", "intcurve", "curve"):
+            best = None
+            for c0, c1 in cands:
+                if kind == "ellipse":
+                    cand = self._sample_ellipse(curve, c0, c1)
+                else:
+                    cand = self._sample_spline_curve(curve, c0, c1, v0, v1)
+                if not cand:
+                    continue
+                err = 0.0
+                if v0 is not None:
+                    err += _length(_sub(cand[0], v0))
+                if v1 is not None:
+                    err += _length(_sub(cand[-1], v1))
+                if best is None or err < best[0]:
+                    best = (err, cand)
+                if err < 1e-6:
+                    break
+            if best is not None:
+                pts = best[1]
 
         if not pts:  # straight or unevaluated curve -> just the endpoints
             pts = [p for p in (v0, v1) if p is not None]
@@ -306,9 +331,8 @@ class Brep:
             if v1 is not None:
                 pts[-1] = v1
 
-        if reverse:
-            pts = list(reversed(pts))
-        return pts
+        self._edge_pts[edge.index] = pts
+        return list(reversed(pts)) if reverse else list(pts)
 
     def _loop_ring(self, loop):
         """Return (ring, edges) for one loop.
