@@ -282,6 +282,12 @@ class Brep:
         v1 = self._vertex_point(self._ref_at(edge, EDGE_VEND))
         t0 = edge.values[5] if isinstance(edge.values[5], float) else 0.0
         t1 = edge.values[7] if isinstance(edge.values[7], float) else 1.0
+        # values[10] is the edge sense: True = forward, False = the edge runs
+        # against its curve, and its params refer to the reversed
+        # parametrisation t -> -t (validated: mirrored-quadrant arcs on the
+        # Perchero keyhole pocket resolve only with negated params).
+        if len(edge.values) > 10 and edge.values[10] is False:
+            t0, t1 = -t0, -t1
         curve = self._ref_at(edge, EDGE_CURVE)
         kind = curve.name if curve is not None else "straight"
 

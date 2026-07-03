@@ -528,33 +528,61 @@ def _tessellate_on_surface(face):
     except ImportError:
         return None
 
-    # --- project rings to (u, v), unwrapping periodic u along the loop ---
+    # --- project rings to (u, v), unwrapping periodic u/v along the loop ---
+    periodic_v = getattr(surf, "periodic_v", False)
     uv_loops = []
     for ring in face.loops:
         uv = []
         prev = None
         for p in ring:
             u, v = surf.project(p)
-            if surf.periodic_u and prev is not None:
-                u = prev + _wrap_pi(u - prev)
+            if prev is not None:
+                if surf.periodic_u:
+                    u = prev[0] + _wrap_pi(u - prev[0])
+                if periodic_v:
+                    v = prev[1] + _wrap_pi(v - prev[1])
             uv.append((u, v))
-            prev = u
-        if surf.periodic_u and len(uv) > 1:
-            winding = (uv[-1][0] + _wrap_pi(uv[0][0] - uv[-1][0])) - uv[0][0]
-            if abs(winding) > math.pi:
-                return None      # loop wraps the full period -> loft instead
+            prev = (u, v)
+        if len(uv) > 1:
+            for k, per in ((0, surf.periodic_u), (1, periodic_v)):
+                if not per:
+                    continue
+                winding = (uv[-1][k] + _wrap_pi(uv[0][k] - uv[-1][k])) - uv[0][k]
+                if abs(winding) > math.pi:
+                    return None  # loop wraps the full period -> loft instead
         uv_loops.append(uv)
 
-    # --- scale u to be roughly isometric with 3D distance ---
-    ratios = []
-    for uv, ring in zip(uv_loops, face.loops):
-        for i in range(len(uv) - 1):
-            du = abs(uv[i + 1][0] - uv[i][0])
-            d3 = _dist(ring[i], ring[i + 1])
-            if du > 1e-9 and d3 > 1e-12:
-                ratios.append(d3 / du)
-    su = sorted(ratios)[len(ratios) // 2] if ratios else 1.0
-    su = max(su, 1e-6)
+    # Rings unwrap independently, so a hole may land one period away from
+    # the outer loop; shift each ring by whole periods onto the first ring.
+    if len(uv_loops) > 1:
+        ref_u = sum(p[0] for p in uv_loops[0]) / len(uv_loops[0])
+        ref_v = sum(p[1] for p in uv_loops[0]) / len(uv_loops[0])
+        for li in range(1, len(uv_loops)):
+            uv = uv_loops[li]
+            du = dv = 0.0
+            if surf.periodic_u:
+                mu = sum(p[0] for p in uv) / len(uv)
+                du = 2 * math.pi * round((ref_u - mu) / (2 * math.pi))
+            if periodic_v:
+                mv = sum(p[1] for p in uv) / len(uv)
+                dv = 2 * math.pi * round((ref_v - mv) / (2 * math.pi))
+            if du or dv:
+                uv_loops[li] = [(u + du, v + dv) for (u, v) in uv]
+
+    # --- scale u and v to be roughly isometric with 3D distance ---
+    def _axis_scale(k):
+        ratios = []
+        for uv, ring in zip(uv_loops, face.loops):
+            for i in range(len(uv) - 1):
+                dp = abs(uv[i + 1][k] - uv[i][k])
+                d3 = _dist(ring[i], ring[i + 1])
+                if dp > 1e-9 and d3 > 1e-12:
+                    ratios.append(d3 / dp)
+        s = sorted(ratios)[len(ratios) // 2] if ratios else 1.0
+        return max(s, 1e-6)
+
+    su = _axis_scale(0)
+    sv = _axis_scale(1) if periodic_v else 1.0
 
     pts2 = []
     exact3d = []
@@ -563,10 +591,10 @@ def _tessellate_on_surface(face):
     for uv, ring in zip(uv_loops, face.loops):
         base = len(pts2)
         n = len(uv)
-        pts2.extend(Vector((u * su, v)) for (u, v) in uv)
+        pts2.extend(Vector((u * su, v * sv)) for (u, v) in uv)
         exact3d.extend(ring)
         edges.extend((base + i, base + (i + 1) % n) for i in range(n))
-        polys2.append([(u * su, v) for (u, v) in uv])
+        polys2.append([(u * su, v * sv) for (u, v) in uv])
     n_boundary = len(pts2)
 
     # --- interior Steiner grid at boundary sampling density ---
@@ -605,7 +633,7 @@ def _tessellate_on_surface(face):
         if orig:
             verts3.append(exact3d[orig[0]])
         else:
-            verts3.append(surf.eval(co.x / su, co.y))
+            verts3.append(surf.eval(co.x / su, co.y / sv))
 
     tris = []
     for fverts in ofaces:

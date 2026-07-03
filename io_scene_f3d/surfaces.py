@@ -121,6 +121,7 @@ class Torus:
     """
 
     periodic_u = True
+    periodic_v = True          # v is the tube angle: atan2 seam at +/-pi
 
     def __init__(self, center, axis, R, r, refdir):
         self.center = center

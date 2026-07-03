@@ -162,7 +162,7 @@ records de cada clase:
 | face    | `[4]`→next face, `[5]`→loop, `[6]`→shell, `[8]`→surface |
 | loop    | `[4]`→next loop (agujeros), `[5]`→coedge, `[6]`→face |
 | coedge  | `[4]`→next, `[5]`→prev, `[7]`→edge, `[8]`=sense (enum), `[9]`→loop, `[11]`→pcurve |
-| edge    | `[4]`→vértice inicio, `[5]`=t₀, `[6]`→vértice fin, `[7]`=t₁, `[9]`→curve |
+| edge    | `[4]`→vértice inicio, `[5]`=t₀, `[6]`→vértice fin, `[7]`=t₁, `[9]`→curve, `[10]`=sentido (bool) |
 | vertex  | `[6]`→point |
 
 **Trampas descubiertas (importantes para cualquier lector):**
@@ -172,6 +172,13 @@ records de cada clase:
   de extremos (los vértices compartidos son exactos).
 - El orden de los loops de una cara **no garantiza** el exterior primero; hay
   que ordenarlos por tamaño (bbox) — el exterior contiene a los agujeros.
+- El bool `edge[10]` es el **sentido de la arista respecto a su curva**:
+  `True` = forward, `False` = invertida. En una arista invertida los
+  parámetros t₀/t₁ se refieren a la **parametrización invertida** `t → -t`:
+  hay que **negarlos** antes de evaluar la curva. Si no se negan, los arcos
+  circulares se muestrean en el **cuadrante especular** (validado en el
+  rebaje "ojo de cerradura" del Perchero: arcos de esquina que daban 1.56 mm
+  de error se corrigen exactamente al negar).
 
 ### 2.4 Geometría de curvas
 
@@ -222,6 +229,10 @@ Convenciones **no estándar** descubiertas (críticas):
   [10]=dirección de referencia`. `S(u,v) = C + (R + r·cos v)·(cos u·M̂ +
   sin u·N̂) + r·sin v·êje`. R < r es válido (toro tipo limón/manzana en
   fillets de esquina). Validado: residuo < 1.4·10⁻⁴ en 102 caras.
+  Ojo: el toro es periódico en **ambos** parámetros; una cara puede cruzar
+  la costura de v (atan2 en ±π, el ecuador interior) igual que la de u, y el
+  teselador debe desenvolver ambas (caras que la cruzaban salían 1.3–1.7 mm
+  desplazadas al triangular un dominio uv roto).
 - **`srf_srf_v_bl_spl_sur`**: **blend/fillet** entre dos superficies soporte
   (que van embebidas en el record como `blend_support_surface`, p.ej. un
   `cyl_spl_sur` y un `cone`). El record contiene la **curva del centro de la
