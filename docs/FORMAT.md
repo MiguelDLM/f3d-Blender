@@ -284,12 +284,12 @@ geometría y el importador los ignora.
 | Contenedor ZIP + manifiestos       | ✅ Documentado |
 | Tokenización ASM SAB               | ✅ Parser completo (`sab.py`) |
 | Grafo topológico B-rep             | ✅ Offsets verificados (§2.3); cuerpos/caras/loops/aristas |
-| Curvas (recta, elipse, nubs/nurbs) | ✅ de Boor validado; periódicas (flag=2) con wrap de parámetros |
+| Curvas (recta, elipse, nubs/nurbs) | ✅ de Boor validado; periódicas (flag=2) con wrap; sentido de arista auto-validado contra vértices (§2.3) |
 | Superficies (plano, cono, toro, extrusión)| ✅ Evaluación analítica, residual < 6·10⁻⁶ (toro < 1.4·10⁻⁴) |
 | Modelo vs. historial (`.smbh`/`.smb`) | ✅ Se importa el modelo actual; regla de ordinales con `delta_state`/`Begin` |
 | Superficies blend (fillets)        | ✅ Franja reglada entre perfiles de contacto (§2.6) |
 | Pool de referencias `ref N`        | ✅ Regla validada (§2.7) |
 | Teselación de caras recortadas     | ✅ CDT en espacio paramétrico + loft (`tessellate.py`) |
-| Fidelidad vs. OBJ de referencia    | ✅ Área 76.668 / 76.608 cm² (0.08 %); desviación media 10–26 µm, máx 140 µm; malla estanca (0 aristas no-manifold) |
+| Fidelidad vs. OBJ de referencia    | ✅ Soporte: media 10–26 µm, máx 140 µm, 0 no-manifold. Perchero (3 cuerpos visibles): media 6–34 µm, máx 156–431 µm (nivel de cuerda a deviation=0.02) |
 | `BulkStream.dat` (árbol/materiales)| 🔜 Parcial (strings) |
 | Operador de importación Blender    | ✅ Funcional (`importer.py`): escala, dedup de cuerpos, soldadura |
