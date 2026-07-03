@@ -14,6 +14,7 @@ import os
 
 import bpy
 import bmesh
+import mathutils
 
 try:
     from . import container, sab, brep, tessellate
@@ -21,7 +22,63 @@ except ImportError:  # pragma: no cover - allow flat import
     import container, sab, brep, tessellate
 
 
-def _build_mesh(name, body, scale):
+def _weld_t_junctions(bm, tol):
+    """Split boundary edges at boundary vertices lying on them, then weld.
+
+    ASM stores the same model ring as different edge records on each side of
+    some face pairs, sampled at different densities; after welding, the odd
+    vertices of one side sit ON (or within chord error of) the other side's
+    boundary edges, leaving hairline cracks.  Splitting the edge at the
+    stray vertex and snapping the new vertex onto it closes the crack
+    exactly instead of papering over it with fill faces.
+    """
+    border = [e for e in bm.edges if e.is_boundary]
+    if not border:
+        return
+    bverts = list({v for e in border for v in e.verts})
+    kd = mathutils.kdtree.KDTree(len(bverts))
+    for i, v in enumerate(bverts):
+        kd.insert(v.co, i)
+    kd.balance()
+    for e in border:
+        if not e.is_valid:
+            continue
+        hits = []
+        a = e.verts[0].co.copy()
+        b = e.verts[1].co.copy()
+        ab = b - a
+        length2 = ab.length_squared
+        if length2 < 1e-16:
+            continue
+        for (co, idx, _d) in kd.find_range((a + b) / 2, ab.length / 2 + tol):
+            v = bverts[idx]
+            if not v.is_valid or v in e.verts:
+                continue
+            t = (v.co - a).dot(ab) / length2
+            if t < 1e-3 or t > 1.0 - 1e-3:
+                continue
+            if ((a + ab * t) - v.co).length <= tol:
+                hits.append((t, v))
+        if not hits:
+            continue
+        hits.sort(reverse=True)     # split from the far end: keeps t valid
+        cur = e
+        v0 = e.verts[0]
+        prev_t = 1.0
+        for t, v in hits:
+            # fac is a fraction (from v0) of the remaining [0, prev_t] span
+            # of the original edge; after the split, continue on whichever
+            # half still contains v0
+            new_edge, new_vert = bmesh.utils.edge_split(cur, v0, t / prev_t)
+            new_vert.co = v.co      # exact weld target
+            cur = new_edge if v0 in new_edge.verts else cur
+            if v0 not in cur.verts:
+                break
+            prev_t = t
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-6)
+
+
+def _build_mesh(name, body, scale, chord_tol=0.0):
     """Build a welded, normal-consistent mesh from one :class:`brep.Body`."""
     verts = []
     faces = []
@@ -55,6 +112,7 @@ def _build_mesh(name, body, scale):
     # a defect -- typically a sliver where ASM stores the same ring as
     # different edge records on each side (sampled at different densities).
     # Close such small cracks; genuine model holes have walls, not boundaries.
+    _weld_t_junctions(bm, max(chord_tol, 1e-5))
     border = [e for e in bm.edges if e.is_boundary]
     if border:
         bmesh.ops.holes_fill(bm, edges=border, sides=8)
@@ -120,7 +178,8 @@ def load(context, filepath, deviation=0.1, join_bodies=False,
     objects = []
     for bi, body in enumerate(all_bodies):
         name = base if len(all_bodies) == 1 else f"{base}.{bi:03d}"
-        mesh = _build_mesh(name, body, global_scale)
+        mesh = _build_mesh(name, body, global_scale,
+                           chord_tol=deviation * global_scale)
         if len(mesh.polygons) == 0:
             bpy.data.meshes.remove(mesh)
             continue

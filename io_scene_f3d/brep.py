@@ -83,13 +83,65 @@ def _ratio_value(rec) -> float:
 def _chain_polylines(polys):
     """Order/orient edge polylines into a connected cycle.
 
-    Starts from the first polyline and repeatedly appends the remaining one
-    whose closer endpoint matches the current chain end, flipping it when its
-    tail (not head) connects.  Robust to wrong stored senses and scrambled
-    coedge order because loop edges share exact vertex coordinates.
+    Loop edges share exact vertex coordinates, so a correct ordering connects
+    every consecutive pair exactly and closes back on the start.  A greedy
+    nearest-endpoint walk breaks on outlines that touch themselves (four edge
+    ends coincide at a tangent vertex: it can take the wrong branch, strand
+    the rest, and then silently teleport across the gap).  So the cycle is
+    found by backtracking over exact endpoint matches first; the greedy walk
+    remains only as a fallback for loops that genuinely do not close.
     """
     if len(polys) <= 1:
         return list(polys)
+    tol = 1e-7
+    n = len(polys)
+
+    def ends(i, flip):
+        p = polys[i]
+        return (p[-1], p[0]) if flip else (p[0], p[-1])
+
+    def matches(pt, used):
+        out = []
+        for i in range(n):
+            if used[i]:
+                continue
+            if _length(_sub(pt, polys[i][0])) <= tol:
+                out.append((i, False))
+            if _length(_sub(pt, polys[i][-1])) <= tol:
+                out.append((i, True))
+        return out
+
+    # iterative DFS: order[k] = (poly index, flipped); stack holds candidate
+    # iterators so the search can back out of a wrong branch at a tangent
+    used = [False] * n
+    used[0] = True
+    order = [(0, False)]
+    stack = [iter(matches(ends(0, False)[1], used))]
+    start_pt = polys[0][0]
+    steps = 0
+    solved = False
+    while stack and steps < 20000:
+        steps += 1
+        if len(order) == n:
+            if _length(_sub(ends(*order[-1])[1], start_pt)) <= tol:
+                solved = True
+                break
+        try:
+            i, flip = next(stack[-1])
+        except StopIteration:
+            stack.pop()
+            if len(order) > len(stack):
+                oi, _ = order.pop()
+                used[oi] = False
+            continue
+        used[i] = True
+        order.append((i, flip))
+        stack.append(iter(matches(ends(i, flip)[1], used)))
+    if solved:
+        return [list(reversed(polys[i])) if f else list(polys[i])
+                for i, f in order]
+
+    # fallback: nearest-endpoint greedy (tolerates gaps / sloppy loops)
     remaining = list(polys[1:])
     chain = [list(polys[0])]
     while remaining:
